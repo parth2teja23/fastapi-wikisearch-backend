@@ -1,6 +1,8 @@
 # WikiSearch — Complete Technical Documentation
 
-> A full-stack Wikipedia search engine built on a DigitalOcean VPS, powered by FastAPI, Meilisearch, and Next.js. Live at `wikisearch.parth2teja.in`.
+> A full-stack Wikipedia search engine powered by FastAPI, Meilisearch, and Next.js.
+> - Frontend: `wikisearch.parth2teja.in` (Vercel)
+> - Backend API: `wikisearch-backend.parth2teja.in` (DigitalOcean VPS)
 
 ---
 
@@ -37,7 +39,8 @@ The result is a fast, self-hosted search API with sub-50ms response times, our o
 | Web server | Nginx (reverse proxy) |
 | VPS | DigitalOcean — 2vCPU, 2GB RAM, 60GB SSD |
 | SSL | Let's Encrypt via Certbot |
-| Domain | wikisearch.parth2teja.in |
+| Frontend domain | wikisearch.parth2teja.in (Vercel) |
+| Backend domain | wikisearch-backend.parth2teja.in (VPS) |
 
 ---
 
@@ -48,26 +51,32 @@ User Browser
      │
      │  HTTPS
      ▼
-wikisearch.parth2teja.in  (DNS A record → 139.59.58.223)
+wikisearch.parth2teja.in        (DNS → Vercel)
      │
      ▼
 Vercel (Next.js Frontend)
      │
-     │  API calls to https://wikisearch.parth2teja.in/api/...
+     │  API calls to https://wikisearch-backend.parth2teja.in/...
+     ▼
+wikisearch-backend.parth2teja.in  (DNS A record → 139.59.58.223)
+     │
      ▼
 DigitalOcean VPS (139.59.58.223)
      │
      ▼
 Nginx (port 80/443)
-  ├── /         → Next.js  (port 3000)  [if self-hosted]
-  └── /api/     → FastAPI  (port 8000)
-                     │
-                     ▼
-               Meilisearch (port 7700, internal only)
-                     │
-                     ▼
-               meili_data/ (on disk, ~500MB for simplewiki)
+  └── /     → FastAPI  (port 8000)
+                 │
+                 ▼
+           Meilisearch (port 7700, internal only)
+                 │
+                 ▼
+           meili_data/ (on disk, ~500MB for simplewiki)
 ```
+
+Two subdomains, both on `parth2teja.in`:
+- `wikisearch` points to Vercel via Vercel's DNS config (CNAME)
+- `wikisearch-backend` points to the VPS via a GoDaddy A record (`139.59.58.223`)
 
 Meilisearch is never exposed to the public internet — only FastAPI can talk to it internally via `localhost:7700`. This is a key security decision.
 
@@ -299,20 +308,20 @@ We search by title rather than by ID because the frontend only knows the title (
 
 ### CORS
 
-Since the frontend is on Vercel (`https://wikisearch.parth2teja.in`) and the API is on our VPS, we need CORS middleware:
+Since the frontend is on Vercel (`https://wikisearch.parth2teja.in`) and the API is on a different subdomain (`https://wikisearch-backend.parth2teja.in`), we need CORS middleware:
 
 ```python
 from fastapi.middleware.cors import CORSMiddleware
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["https://wikisearch.parth2teja.in"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
 ```
 
-Without this, browsers block cross-origin API calls with a CORS error.
+Without this, browsers block cross-origin API calls with a CORS error. We restrict `allow_origins` to just our frontend domain rather than `"*"` — this means only our frontend can call the API from a browser.
 
 ### Running as a systemd service
 
@@ -380,22 +389,22 @@ Swap is slower than RAM (it uses disk) but prevents OOM kills during the one-tim
 
 ### Nginx as reverse proxy
 
-Nginx sits in front of everything on port 80/443. It routes traffic based on the URL path:
+Nginx sits on the VPS and routes all traffic for `wikisearch-backend.parth2teja.in` to FastAPI on port 8000:
 
 ```nginx
 server {
     listen 80;
-    server_name wikisearch.parth2teja.in;
+    server_name wikisearch-backend.parth2teja.in;
 
     location / {
-        proxy_pass http://127.0.0.1:3000;   # Next.js (if self-hosted)
-    }
-
-    location /api/ {
         proxy_pass http://127.0.0.1:8000;   # FastAPI
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
     }
 }
 ```
+
+The frontend (`wikisearch.parth2teja.in`) is handled entirely by Vercel — the VPS has no involvement in serving the frontend at all.
 
 Why a reverse proxy instead of exposing FastAPI directly?
 - Single entry point for all traffic (one port 80/443)
@@ -411,16 +420,16 @@ Why a reverse proxy instead of exposing FastAPI directly?
 | 443 | Nginx (HTTPS) | Public internet |
 | 8000 | FastAPI (uvicorn) | localhost only |
 | 7700 | Meilisearch | localhost only |
-| 3000 | Next.js (if self-hosted) | localhost only |
+
+Next.js runs on Vercel's infrastructure — no port on the VPS.
 
 ### Systemd services
 
-Three systemd services keep everything running:
+Two systemd services keep the backend running:
 
 ```
 meilisearch.service     → Meilisearch search engine
 wikisearch-api.service  → FastAPI backend
-wikisearch-frontend.service  → Next.js (if self-hosted)
 ```
 
 `Restart=always` on each means they auto-restart on crash. `systemctl enable` makes them start on VPS reboot. This is how production servers are managed — no manual `python app.py` in a terminal.
@@ -431,24 +440,28 @@ wikisearch-frontend.service  → Next.js (if self-hosted)
 
 ### DNS Setup
 
-`parth2teja.in` is registered on GoDaddy. We added an A record:
+`parth2teja.in` is registered on GoDaddy. We use two subdomains:
 
+**Backend (GoDaddy A record):**
 ```
 Type: A
-Host: wikisearch
+Host: wikisearch-backend
 Value: 139.59.58.223
 TTL: 1 hour
 ```
 
-This tells DNS: "when anyone asks for `wikisearch.parth2teja.in`, send them to `139.59.58.223`". TTL (Time To Live) controls how long DNS resolvers cache this record — 1 hour means changes propagate within an hour.
+**Frontend (Vercel):**
+Vercel manages the `wikisearch.parth2teja.in` subdomain automatically when you add a custom domain in the Vercel dashboard. It adds a CNAME record pointing to Vercel's edge network.
+
+TTL (Time To Live) controls how long DNS resolvers cache a record — 1 hour means changes propagate within an hour.
 
 ### Let's Encrypt SSL
 
-We use Certbot to get a free SSL certificate from Let's Encrypt:
+We use Certbot to get a free SSL certificate from Let's Encrypt for the backend subdomain:
 
 ```bash
 sudo apt install certbot python3-certbot-nginx -y
-sudo certbot --nginx -d wikisearch.parth2teja.in
+sudo certbot --nginx -d wikisearch-backend.parth2teja.in
 ```
 
 Certbot:
@@ -471,11 +484,11 @@ When a user searches for "black hole", here's the complete journey:
 
 1. **Browser** — user types "black hole" and hits search on `wikisearch.parth2teja.in` (Vercel)
 
-2. **Next.js** — `fetch("https://wikisearch.parth2teja.in/api/search?q=black+hole&limit=10")`
+2. **Next.js** — `fetch("https://wikisearch-backend.parth2teja.in/search?q=black+hole&limit=10")`
 
-3. **DNS** — resolves `wikisearch.parth2teja.in` to `139.59.58.223`
+3. **DNS** — resolves `wikisearch-backend.parth2teja.in` to `139.59.58.223`
 
-4. **Nginx on VPS** — receives HTTPS request on port 443, terminates SSL, sees path starts with `/api/`, proxies to `http://127.0.0.1:8000/api/search?q=black+hole&limit=10`
+4. **Nginx on VPS** — receives HTTPS request on port 443, terminates SSL, proxies to `http://127.0.0.1:8000/search?q=black+hole&limit=10`
 
 5. **FastAPI** — checks Redis cache for `search:black hole:10`. Cache miss → proceeds.
 
@@ -494,7 +507,7 @@ When a user searches for "black hole", here's the complete journey:
 
 10. **User clicks "Black hole"** — navigates to `/article/Black%20hole`
 
-11. **Article page** — fetches `GET /api/article/Black%20hole`
+11. **Article page** — fetches `GET https://wikisearch-backend.parth2teja.in/article/Black%20hole`
 
 12. **FastAPI** → **Meilisearch** — searches by title with filter, retrieves full `text` field
 
@@ -525,8 +538,36 @@ Right now the article text is raw plain text with `whitespace-pre-wrap`. Parse i
 **Full English Wikipedia**
 Upgrade the VPS to 4GB+ RAM and 160GB+ disk. Re-run the same pipeline on the full English dump. The architecture doesn't change at all — just the data size.
 
-**Semantic / vector search**
-Use `sentence-transformers` to generate embeddings for each article during indexing, store them in a vector database (FAISS or Meilisearch's built-in vector search), and support "meaning-based" queries. For example, searching "heart attack" would also return articles about "cardiac arrest" even if the exact words don't match.
+**Semantic / vector search (vectorisation)**
+This is the single biggest upgrade possible. Current keyword search (BM25) matches exact words. Vector search matches *meaning*. Here's how it would work:
+
+During indexing, pass each article's text through a sentence embedding model like `sentence-transformers/all-MiniLM-L6-v2`. This converts the text into a 384-dimensional float vector that captures its semantic meaning. Store this vector alongside the document.
+
+```python
+from sentence_transformers import SentenceTransformer
+
+model = SentenceTransformer("all-MiniLM-L6-v2")
+
+def embed(text: str) -> list[float]:
+    return model.encode(text[:512]).tolist()  # cap at 512 tokens
+
+# during indexing:
+batch.append({
+    "id": total,
+    "title": article["title"],
+    "text": clean_text,
+    "_vectors": {"default": embed(clean_text)}  # Meilisearch vector field
+})
+```
+
+At search time, embed the query the same way and find the documents whose vectors are closest (cosine similarity). Meilisearch supports this natively via its vector search feature.
+
+The result: searching "heart attack" returns articles about "cardiac arrest" and "myocardial infarction" even though those words aren't in the query. Searching "fastest animal on land" returns the cheetah article even if it doesn't contain the word "fastest".
+
+The challenge: embedding 220,000 articles takes significant compute. On a CPU it'd take hours. On a GPU it'd take minutes. For a VPS project, generate embeddings once, store them, and never recompute unless re-indexing. Also, 220,000 × 384 floats = ~340MB of extra index storage.
+
+**Hybrid search (BM25 + vectors)**
+The best production approach is to combine both: run keyword search and vector search in parallel, then merge and re-rank the results. This gives you the precision of keyword matching with the recall of semantic search. Meilisearch supports this via its `hybrid` search parameter.
 
 **API key system**
 Add proper API key issuance (`POST /api/keys/generate`), per-key rate limiting via `slowapi`, and usage dashboards. Turn this into a public API others can use.
