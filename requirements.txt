@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+meilisearch
+sqlalchemy[asyncio]
+aiosqlite
+redis
+slowapi
+httpx
+python-dotenv

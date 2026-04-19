@@ -1,0 +1,22 @@
+client/
+.venv/
+# Wikipedia dump
+*.bz2
+*.xml
+
+# Meilisearch data
+meili_data/
+
+# Python
+venv/
+__pycache__/
+*.pyc
+.env
+
+# OS
+.DS_Store
+
+# Meilisearch binary
+*.exe
+meilisearch
+meilisearch.exe
